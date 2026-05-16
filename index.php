@@ -6,20 +6,17 @@ if (!isset($_SESSION['user_id'])) { header("Location: login.php"); exit; }
 $u_id = $_SESSION['user_id'];
 $today = date('Y-m-d');
 
-// --- ОДОБРЕНИЕ СКИДКИ ---
+// --- ОДОБРЕНИЕ/ОТКЛОНЕНИЕ СКИДКИ ---
 if (isset($_POST['handle_discount'])) {
-
     $inv_id = intval($_POST['inv_id']);
-    $action = $_POST['action'];
+    $action = $_POST['action'] ?? '';
 
     if ($action == 'approve') {
-
         $st = $pdo->prepare("SELECT amount, requested_discount FROM invoices WHERE id = ? AND sender_id1 = ?");
         $st->execute([$inv_id, $u_id]);
         $row = $st->fetch(PDO::FETCH_ASSOC);
 
         if ($row && $row['requested_discount'] > 0) {
-
             $pdo->prepare("
                 UPDATE invoices 
                 SET amount = amount - requested_discount,
@@ -29,8 +26,7 @@ if (isset($_POST['handle_discount'])) {
             ")->execute([$inv_id]);
         }
 
-    } else {
-
+    } elseif ($action == 'reject') {
         $pdo->prepare("
             UPDATE invoices 
             SET discount_status = 'Отклонено',
@@ -38,11 +34,14 @@ if (isset($_POST['handle_discount'])) {
             WHERE id = ?
         ")->execute([$inv_id]);
     }
+    
+    header("Refresh: 1");
+    exit;
 }
 
 // --- пользователь ---
 $u_stmt = $pdo->prepare("
-    SELECT bonus_balance, loyalty_level, card_number, temp_auth_code
+    SELECT bonus_balance, loyalty_level, loyalty_tier, card_number, temp_auth_code
     FROM users1
     WHERE id = ?
 ");
@@ -69,10 +68,9 @@ $received_invoices = $recv_stmt->fetchAll(PDO::FETCH_ASSOC);
 $deadline_alerts = [];
 $status_requests = [];
 $new_invoice_alerts = [];
-$discount_requests = [];
+$discount_requests = []; // Запросы скидок ОТ получателей (к обработке отправителем)
 
 foreach ($received_invoices as $inv) {
-
     if ($inv['status'] == 'Новый') {
         $new_invoice_alerts[] = "🔔 Новый счет №<b>{$inv['invoice_number']}</b> от {$inv['contact_name']}";
     }
@@ -83,17 +81,17 @@ foreach ($received_invoices as $inv) {
 }
 
 foreach ($sent_invoices as $inv) {
-
     if (!empty($inv['pending_status'])) {
         $status_requests[] = $inv;
     }
 
+    // Запросы скидок от получателей
     if ($inv['discount_status'] == 'Ожидает') {
         $discount_requests[] = $inv;
     }
 }
 
-// --- ФУНКЦИЯ: Расчет финальной суммы с учетом скидок и бонусов ---
+// --- ФУНК��ИЯ: Расчет финальной суммы с учетом скидок и бонусов ---
 function calculateFinalAmount($invoice) {
     // Исходная сумма
     $amount = floatval($invoice['amount']);
@@ -161,6 +159,10 @@ function getDiscountBadge($invoice) {
     return "<span class='badge {$status_class} mt-1'>Скидка: -{$discount_amount} BYN ({$status_text})</span>";
 }
 
+function safeGet($arr, $key, $default = '') {
+    return isset($arr[$key]) && !empty($arr[$key]) ? htmlspecialchars($arr[$key], ENT_QUOTES, 'UTF-8') : $default;
+}
+
 include 'header.php';
 ?>
 
@@ -177,32 +179,42 @@ include 'header.php';
 <!-- ================= УВЕДОМЛЕНИЯ ================= -->
 
 <?php if(!empty($new_invoice_alerts) || !empty($deadline_alerts) || !empty($status_requests) || !empty($discount_requests) || !empty($curr_user['temp_auth_code'])): ?>
-<div class="card bg-white shadow-sm p-3 mb-4 border-start border-primary border-4">
+<div class="card bg-white shadow-sm p-3 mb-4 border-start border-primary border-4 rounded-4">
 
-    <h6 class="fw-bold text-uppercase small text-primary mb-3">⚡ Уведомления</h6>
+    <h6 class="fw-bold text-uppercase small text-primary mb-3">⚡ Уведомления (<?php echo count($new_invoice_alerts) + count($deadline_alerts) + count($status_requests) + count($discount_requests) + (!empty($curr_user['temp_auth_code']) ? 1 : 0); ?>)</h6>
 
+    <!-- 2FA КОД -->
     <?php if($curr_user['temp_auth_code']): ?>
-        <div class="alert alert-dark py-2 small mb-2 d-flex justify-content-between align-items-center"
-             style="background:#0f172a; color:white; border:0; border-radius: 12px;">
-            <span>🛡️ Ваш 2FA код: <b class="text-warning"><?php echo htmlspecialchars($curr_user['temp_auth_code']); ?></b></span>
+        <div class="alert alert-dark py-2 small mb-2 d-flex justify-content-between align-items-center rounded-3"
+             style="background:#0f172a; color:white; border:0;">
+            <span>🛡️ Ваш 2FA код: <b class="text-warning"><?php echo safeGet($curr_user, 'temp_auth_code'); ?></b></span>
         </div>
     <?php endif; ?>
 
-    <?php foreach($new_invoice_alerts as $m) echo "<div class='alert alert-info py-2 small mb-2 rounded-3'>🔔 $m</div>"; ?>
-    <?php foreach($deadline_alerts as $m) echo "<div class='alert alert-danger py-2 small mb-2 rounded-3'>$m</div>"; ?>
+    <!-- НОВЫЕ СЧЕТА -->
+    <?php foreach($new_invoice_alerts as $m): ?>
+        <div class="alert alert-info py-2 small mb-2 rounded-3">🔔 <?php echo $m; ?></div>
+    <?php endforeach; ?>
 
-    <!-- ЗАПРОСЫ СКИДОК -->
+    <!-- ПРОСРОЧЕННЫЕ СЧЕТА -->
+    <?php foreach($deadline_alerts as $m): ?>
+        <div class="alert alert-danger py-2 small mb-2 rounded-3"><?php echo $m; ?></div>
+    <?php endforeach; ?>
+
+    <!-- ЗАПРОСЫ СКИДОК ОТ ПОЛУЧАТЕЛЕЙ (для отправителя) -->
     <?php foreach($discount_requests as $d): ?>
         <div class="alert alert-warning py-3 small mb-2 d-flex justify-content-between align-items-center rounded-3">
             <div>
-                <span>💰 Запрос скидки на счет <b>№<?php echo htmlspecialchars($d['invoice_number']); ?></b></span>
+                <span>💰 Запрос скидки на счет <b>№<?php echo safeGet($d, 'invoice_number'); ?></b></span>
                 <br/>
-                <small class="text-muted">Сумма: <b><?php echo number_format($d['requested_discount'], 2); ?> BYN</b> (от <b><?php echo htmlspecialchars($d['contact_name']); ?></b>)</small>
+                <small class="text-muted">Сумма скидки: <b><?php echo number_format(floatval($d['requested_discount']), 2); ?> BYN</b></small>
+                <br/>
+                <small class="text-muted">От: <b><?php echo safeGet($d, 'contact_name'); ?></b></small>
             </div>
-            <form method="POST" class="d-flex gap-1">
+            <form method="POST" class="d-flex gap-1 ms-2" style="flex-shrink: 0;">
                 <input type="hidden" name="inv_id" value="<?php echo intval($d['id']); ?>">
-                <button type="submit" name="handle_discount" value="1" class="btn btn-sm btn-success fw-bold" title="Одобрить скидку">✅ OK</button>
-                <button type="submit" name="action" value="reject" class="btn btn-sm btn-danger fw-bold" title="Отклонить скидку">❌ NO</button>
+                <button type="submit" name="handle_discount" value="1" class="btn btn-sm btn-success fw-bold px-3" title="Одобрить скидку">✅</button>
+                <button type="submit" name="action" value="reject" class="btn btn-sm btn-danger fw-bold px-3" title="Отклонить скидку">❌</button>
             </form>
         </div>
     <?php endforeach; ?>
@@ -213,9 +225,9 @@ include 'header.php';
             <div>
                 <span>💳 Подтвердите получение оплаты</span>
                 <br/>
-                <small class="text-muted">Счет <b>№<?php echo htmlspecialchars($n['invoice_number']); ?></b> - <b><?php echo number_format(calculateFinalAmount($n), 2); ?> BYN</b></small>
+                <small class="text-muted">Счет <b>№<?php echo safeGet($n, 'invoice_number'); ?></b> - <b><?php echo number_format(calculateFinalAmount($n), 2); ?> BYN</b></small>
             </div>
-            <form action="confirm_status.php" method="POST">
+            <form action="confirm_status.php" method="POST" style="flex-shrink: 0;">
                 <input type="hidden" name="id" value="<?php echo intval($n['id']); ?>">
                 <button type="submit" name="action" value="approve" class="btn btn-sm btn-success fw-bold">✅ Подтвердить</button>
             </form>
@@ -246,7 +258,7 @@ include 'header.php';
     <div class="col-md-4">
         <div class="card p-4 shadow-sm border-0 rounded-4" style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);">
             <div class="text-muted small fw-bold">🎁 Бонусы</div>
-            <h3 class="text-warning fw-bold m-0"><?php echo number_format(($curr_user['bonus_balance'] ?? 0) / 100, 2); ?> BYN</h3>
+            <h3 class="text-warning fw-bold m-0"><?php echo number_format((floatval($curr_user['bonus_balance'] ?? 0) / 100), 2); ?> BYN</h3>
         </div>
     </div>
 
@@ -255,9 +267,9 @@ include 'header.php';
 <!-- ================= ВЫСТАВЛЕННЫЕ СЧЕТА ================= -->
 
 <div class="card bg-white shadow-sm border-0 mb-5 overflow-hidden rounded-4">
-    <div class="card-header bg-dark text-white p-3 fw-bold">📤 Выставленные мной счета</div>
+    <div class="card-header bg-dark text-white p-3 fw-bold">📤 Выставленные мной счета (<?php echo count($sent_invoices); ?>)</div>
     <div class="table-responsive"><table class="table table-hover align-middle mb-0">
-        <thead class="table-light small"><tr><th>№</th><th>ЗАКАЗЧИК</th><th>ИСХОДНАЯ</th><th>СКИДКА</th><th>К ОПЛАТЕ</th><th>СТА��УС</th><th>ДЕЙСТВИЯ</th></tr></thead>
+        <thead class="table-light small"><tr><th>№</th><th>ЗАКАЗЧИК</th><th>ИСХОДНАЯ</th><th>СКИДКА</th><th>К ОПЛАТЕ</th><th>СТАТУС</th><th>ДЕЙСТВИЯ</th></tr></thead>
         <tbody>
             <?php foreach($sent_invoices as $i): 
                 $original = floatval($i['amount']);
@@ -265,8 +277,8 @@ include 'header.php';
                 $final = calculateFinalAmount($i);
             ?>
             <tr class="<?php echo getStatusColor($i['status']); ?> bg-opacity-10">
-                <td><code class="fw-bold"><?php echo htmlspecialchars($i['invoice_number']); ?></code></td>
-                <td><b><?php echo htmlspecialchars($i['contact_name']); ?></b></td>
+                <td><code class="fw-bold"><?php echo safeGet($i, 'invoice_number'); ?></code></td>
+                <td><b><?php echo safeGet($i, 'contact_name'); ?></b></td>
                 <td><span class="text-muted"><?php echo number_format($original, 2); ?> BYN</span></td>
                 <td>
                     <?php if($discount_amount > 0): ?>
@@ -303,7 +315,7 @@ include 'header.php';
 <!-- ================= ПОЛУЧЕННЫЕ СЧЕТА ================= -->
 
 <div class="card bg-white shadow-sm border-0 mb-5 overflow-hidden rounded-4">
-    <div class="card-header bg-primary text-white p-3 fw-bold">📥 Мои полученные счета (К оплате)</div>
+    <div class="card-header bg-primary text-white p-3 fw-bold">📥 Мои полученные счета (<?php echo count($received_invoices); ?>)</div>
     <div class="table-responsive"><table class="table table-hover align-middle mb-0">
         <thead class="table-light small"><tr><th>№</th><th>ИСПОЛНИТЕЛЬ</th><th>ИСХОДНАЯ</th><th>СКИДКА / БОНУСЫ</th><th>К ОПЛАТЕ</th><th>ДЕЙСТВИЕ</th><th>ПЕЧАТЬ</th></tr></thead>
         <tbody>
@@ -314,8 +326,8 @@ include 'header.php';
                 $final = calculateFinalAmount($i);
             ?>
             <tr class="<?php echo getStatusColor($i['status']); ?> bg-opacity-10">
-                <td><code class="fw-bold"><?php echo htmlspecialchars($i['invoice_number']); ?></code></td>
-                <td><b><?php echo htmlspecialchars($i['contact_name']); ?></b></td>
+                <td><code class="fw-bold"><?php echo safeGet($i, 'invoice_number'); ?></code></td>
+                <td><b><?php echo safeGet($i, 'contact_name'); ?></b></td>
                 <td><span class="text-muted"><?php echo number_format($original, 2); ?> BYN</span></td>
                 <td>
                     <div class="small">
@@ -337,7 +349,7 @@ include 'header.php';
                             <a href="pay_invoice.php?id=<?php echo intval($i['id']); ?>" class="btn btn-sm btn-success fw-bold w-100 shadow-sm">💳 Оплатить</a>
                         <?php else: ?>
                             <span class="badge bg-light text-dark border w-100 p-2">
-                                <?php echo htmlspecialchars($i['pending_status'] ?: $i['status']); ?>
+                                <?php echo safeGet($i, 'pending_status') ?: safeGet($i, 'status'); ?>
                             </span>
                         <?php endif; ?>
                     </div>
