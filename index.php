@@ -41,7 +41,7 @@ if (isset($_POST['handle_discount'])) {
 
 // --- пользователь ---
 $u_stmt = $pdo->prepare("
-    SELECT bonus_balance, loyalty_level, loyalty_tier, card_number, temp_auth_code
+    SELECT bonus_balance, loyalty_level, card_number, temp_auth_code
     FROM users1
     WHERE id = ?
 ");
@@ -91,7 +91,7 @@ foreach ($sent_invoices as $inv) {
     }
 }
 
-// --- ФУНК��ИЯ: Расчет финальной суммы с учетом скидок и бонусов ---
+// --- ФУНКЦИЯ: Расчет фи��альной суммы с учетом скидок и бонусов ---
 function calculateFinalAmount($invoice) {
     // Исходная сумма
     $amount = floatval($invoice['amount']);
