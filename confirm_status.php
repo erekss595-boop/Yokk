@@ -124,10 +124,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $filePath = $receiptsDir . "/receipt_" . $receipId . ".html";
         file_put_contents($filePath, $html);
 
-        // Optionally: if you have mail configured, you can email $filePath to receiver.
-
-        // Redirect to invoice view or index with success
-        header('Location: index.php?msg=paid&receipt=' . urlencode('receipts/receipt_' . $receipId . '.html'));
+        // Redirect to receipt view page so sender sees the generated receipt
+        header('Location: receipt_view.php?id=' . intval($receipId));
         exit;
 
     } catch (Exception $e) {
